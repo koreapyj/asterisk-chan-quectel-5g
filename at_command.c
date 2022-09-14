@@ -124,8 +124,8 @@ EXPORT_DEF int at_enqueue_initialization(struct cpvt *cpvt, at_cmd_t from_comman
 	static const char cmd12[] = "AT+CPIN?\r";
 
 	static const char cmd13[] = "AT+COPS=0,0\r";
-	static const char cmd14[] = "AT+CREG=2\r";
-	static const char cmd15[] = "AT+CREG?\r";
+	static const char cmd14[] = "AT+CEREG=2\r";
+	static const char cmd15[] = "AT+CEREG?\r";
 	static const char cmd16[] = "AT+CNUM\r";
 
 	static const char cmd17[] = "AT+QPCMV?\r";

@@ -34,7 +34,7 @@ struct iovec;
 	_( CONN,        "^CONN",        "^CONN:") \
 	_( CPIN,        "+CPIN",        "+CPIN:") \
 \
-	_( CREG,        "+CREG",        "+CREG:") \
+	_( CREG,        "+CEREG",        "+CEREG:") \
 	_( CSQ,         "+CSQ",         "+CSQ:") \
 	_( CSSI,        "+CSSI",        "+CSSI:") \
 	_( CSSU,        "+CSSU",        "+CSSU:") \
@@ -49,7 +49,7 @@ struct iovec;
 	_( NO_DIALTONE, "NO DIALTONE",  "NO DIALTONE\r") \
 	_( OK,          "OK",           "OK\r") \
 	_( CONF,        "^CONF",        "MISSED_CALL:") \
-	_( RING,        "RING",         "RING\r") \
+	_( RING,        "RING",         "RING") \
 \
 	_( RSSI,        "^RSSI",        "^RSSI:") \
 	_( SMMEMFULL,   "^SMMEMFULL",   "^SMMEMFULL:") \

@@ -102,8 +102,8 @@ void test_parse_creg()
 		const char	* input;
 		struct result 	result;
 	} cases[] = {
-		{ "+CREG: 2,1,9110,7E6", { 0, 1, 1, "9110", "7E6"} },
-		{ "+CREG: 2,1,XXXX,AAAA", { 0, 1, 1, "XXXX", "AAAA"} },
+		{ "+CEREG: 2,1,9110,7E6", { 0, 1, 1, "9110", "7E6"} },
+		{ "+CEREG: 2,1,XXXX,AAAA", { 0, 1, 1, "XXXX", "AAAA"} },
 	};
 	unsigned idx = 0;
 	char * input;

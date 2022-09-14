@@ -50,8 +50,8 @@
 	_( AT_CPIN,         "AT+CPIN?") \
 	_( AT_CPMS,         "AT+CPMS") \
 \
-	_( AT_CREG,         "AT+CREG?") \
-	_( AT_CREG_INIT,    "AT+CREG=") \
+	_( AT_CREG,         "AT+CEREG?") \
+	_( AT_CREG_INIT,    "AT+CEREG=") \
 	_( AT_CSCS,         "AT+CSCS") \
 	_( AT_CSQ,          "AT+CSQ") \
 \
