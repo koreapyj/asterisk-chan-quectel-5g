@@ -300,7 +300,8 @@ EXPORT_DEF int at_parse_cmti (const char* str)
 	 * +CMTI: <mem>,<index>
 	 */
 
-	return sscanf (str, "+CMTI: %*[^,],%u", &index) == 1 ? index : -1;
+	return sscanf (str, "+CMTI: %*[^,],%u", &index) == 1 ? index :
+		sscanf (str, "+CMTI: ,%u", &index) == 1 ? index : -1;
 }
 
 /*!
