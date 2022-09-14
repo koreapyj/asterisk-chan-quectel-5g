@@ -117,7 +117,14 @@ EXPORT_DEF int at_read_result_iov (const char * dev, int * read_result, struct r
 		if (*read_result == 0)
 		{
 			res = rb_memcmp (rb, "\r\n", 2);
-			if (res == 0)
+			if (rb_memcmp (rb, "\n", 1) == 0)
+			{
+				rb_read_upd (rb, 1);
+				*read_result = 1;
+
+				return at_read_result_iov (dev, read_result, rb, iov);
+			}
+			else if (res == 0)
 			{
 				rb_read_upd (rb, 2);
 				*read_result = 1;
