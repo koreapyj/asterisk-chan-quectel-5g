@@ -180,7 +180,7 @@ static const struct quectel_application
 		app_send_sms_exec,
 		"QuectelSendSMS(Device,Dest,Message,Validity,Report,Payload)",
 		"QuectelSendSMS(Device,Dest,Message,Validity,Report,Payload)\n"
-		"  Device   - Id of device from quectel.conf\n"
+		"  Device   - Id of device from quectel5g.conf\n"
 		"  Dest     - destination\n"
 		"  Message  - text of the message\n"
 		"  Validity - Validity period in minutes\n"
@@ -192,7 +192,7 @@ static const struct quectel_application
 		app_send_ussd_exec,
 		"QuectelSendUSSD(Device,USSD)",
 		"QuectelSendUSSD(Device,USSD)\n"
-		"  Device   - Id of device from quectel.conf\n"
+		"  Device   - Id of device from quectel5g.conf\n"
 		"  USSD     - ussd command\n"
 	}
 };

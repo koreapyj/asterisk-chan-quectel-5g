@@ -11,7 +11,7 @@
 #include "export.h"			/* EXPORT_DECL EXPORT_DEF */
 #include "mutils.h"
 
-#define CONFIG_FILE		"quectel.conf"
+#define CONFIG_FILE		"quectel5g.conf"
 #define DEVNAMELEN		31
 #define IMEI_SIZE		15
 #define IMSI_SIZE		15
@@ -110,7 +110,7 @@ typedef struct dc_gconfig
 typedef struct dc_uconfig
 {
 	/* unique settings */
-	char			id[DEVNAMELEN];			/*!< id from quectel.conf */
+	char			id[DEVNAMELEN];			/*!< id from quectel5g.conf */
 	char			audio_tty[DEVPATHLEN];		/*!< tty for audio connection */
 	char			data_tty[DEVPATHLEN];		/*!< tty for AT commands */
 	char			imei[IMEI_SIZE+1];		/*!< search device by imei */
