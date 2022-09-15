@@ -858,7 +858,7 @@ e_return:
 		ast_log(LOG_ERROR, "-ESTRPIPE\n");
 		snd_pcm_prepare(pvt->icard);
 	} else if (r < 0) {
-		ast_log(LOG_ERROR, "Read error: %s\n", snd_strerror(r));
+		ast_debug(3, "Read error: %s\n", snd_strerror(r));
 	}
 
 	/* Return NULL frame on error */
