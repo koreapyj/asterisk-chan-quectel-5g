@@ -82,11 +82,11 @@ static int parse_dial_string(char * dialstr, const char** number, int * opts)
 		ast_log (LOG_WARNING, "Empty destination in chan_quectel\n");
 		return AST_CAUSE_INCOMPATIBLE_DESTINATION;
 	}
-	if (!is_valid_phone_number(dest_num))
-	{
-		ast_log (LOG_WARNING, "Invalid destination '%s' in chan_quectel, only 0123456789*#+ABC allowed\n", dest_num);
-		return AST_CAUSE_INCOMPATIBLE_DESTINATION;
-	}
+	// if (!is_valid_phone_number(dest_num))
+	// {
+	// 	ast_log (LOG_WARNING, "Invalid destination '%s' in chan_quectel, only 0123456789*#+ABC allowed\n", dest_num);
+	// 	return AST_CAUSE_INCOMPATIBLE_DESTINATION;
+	// }
 
 	*number = dest_num;
 	*opts = lopts;
