@@ -165,7 +165,7 @@ EXPORT_DEF int at_read_result_iov (const char * dev, int * read_result, struct r
 
 				return iovcnt;
 			}
-			else if (rb_memcmp (rb, "\r\n+CSSU:", 8) == 0 || rb_memcmp (rb, "\r\n+CMS ERROR:", 13) == 0 ||  rb_memcmp (rb, "\r\n+CMGS:", 8) == 0)
+			else if (rb_memcmp (rb, "\r\n+CSSU:", 8) == 0 || rb_memcmp (rb, "\r\n+CMS ERROR:", 13) == 0 || rb_memcmp (rb, "\r\n+CMGS:", 8) == 0 || rb_memcmp (rb, "\r\nOK", 4) == 0)
 			{
 				rb_read_upd (rb, 2);
 				return at_read_result_iov (dev, read_result, rb, iov);
