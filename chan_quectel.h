@@ -191,6 +191,10 @@ typedef struct pvt
 	unsigned int		incoming_sms_index;
 	sms_inbox_item_type	incoming_sms_inbox[SMS_INBOX_ARRAY_SIZE];
 
+	const char			*incoming_mms_trx_id;
+	const char			*connect_reply;
+	int		            connect_length;
+
 	volatile unsigned int	connected:1;			/*!< do we have an connection to a device */
 	unsigned int		initialized:1;			/*!< whether a service level connection exists or not */
 	unsigned int		gsm_registered:1;		/*!< do we have an registration to a GSM */

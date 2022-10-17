@@ -37,6 +37,11 @@ static sqlite3 *smsdb;
 
 #define DEFINE_SQL_STATEMENT(stmt,sql) static sqlite3_stmt *stmt; \
 	const char stmt##_sql[] = sql;
+DEFINE_SQL_STATEMENT(pick_mms_message_stmt, "SELECT * FROM incoming_mms WHERE imsi = ? ORDER BY rowid LIMIT 1")
+DEFINE_SQL_STATEMENT(put_mms_message_stmt, "INSERT OR REPLACE INTO incoming_mms (imsi, trx_id, location, subject) VALUES (?, ?, ?, ?)")
+DEFINE_SQL_STATEMENT(delete_mms_message_stmt, "DELETE FROM incoming_mms WHERE imsi = ? AND trx_id = ?")
+DEFINE_SQL_STATEMENT(clear_mms_message_stmt, "DELETE FROM incoming_mms")
+
 DEFINE_SQL_STATEMENT(get_full_message_stmt, "SELECT message FROM incoming WHERE key = ? ORDER BY seqorder")
 DEFINE_SQL_STATEMENT(put_message_stmt, "INSERT OR REPLACE INTO incoming (key, seqorder, expiration, message) VALUES (?, ?, datetime(julianday(CURRENT_TIMESTAMP) + ? / 86400.0), ?)")
 DEFINE_SQL_STATEMENT(clear_messages_stmt, "DELETE FROM incoming WHERE key = ?")
@@ -44,6 +49,7 @@ DEFINE_SQL_STATEMENT(purge_messages_stmt, "DELETE FROM incoming WHERE expiration
 DEFINE_SQL_STATEMENT(get_cnt_stmt, "SELECT COUNT(seqorder) FROM incoming WHERE key = ?")
 DEFINE_SQL_STATEMENT(create_incoming_stmt, "CREATE TABLE IF NOT EXISTS incoming (key VARCHAR(256), seqorder INTEGER, expiration TIMESTAMP DEFAULT CURRENT_TIMESTAMP, message VARCHAR(256), PRIMARY KEY(key, seqorder))")
 DEFINE_SQL_STATEMENT(create_index_stmt, "CREATE INDEX IF NOT EXISTS incoming_key ON incoming(key)")
+DEFINE_SQL_STATEMENT(create_incoming_mms_stmt, "CREATE TABLE IF NOT EXISTS incoming_mms (imsi VARCHAR(16), trx_id VARCHAR(255), location TEXT, subject TEXT, PRIMARY KEY(imsi, trx_id))")
 DEFINE_SQL_STATEMENT(create_outgoingref_stmt, "CREATE TABLE IF NOT EXISTS outgoing_ref (key VARCHAR(256), refid INTEGER, PRIMARY KEY(key))") // key: IMSI/DEST_ADDR
 DEFINE_SQL_STATEMENT(create_outgoingmsg_stmt, "CREATE TABLE IF NOT EXISTS outgoing_msg (dev VARCHAR(256), dst VARCHAR(255), cnt INTEGER, expiration TIMESTAMP, srr BOOLEAN, payload BLOB)")
 DEFINE_SQL_STATEMENT(create_outgoingpart_stmt, "CREATE TABLE IF NOT EXISTS outgoing_part (key VARCHAR(256), msg INTEGER, status INTEGER, PRIMARY KEY(key))") // key: IMSI/DEST_ADDR/MR
@@ -105,6 +111,7 @@ static void clean_statements(void)
 	clean_stmt(&get_cnt_stmt, get_cnt_stmt_sql);
 	clean_stmt(&create_incoming_stmt, create_incoming_stmt_sql);
 	clean_stmt(&create_index_stmt, create_index_stmt_sql);
+	clean_stmt(&create_incoming_mms_stmt, create_incoming_mms_stmt_sql);
 	clean_stmt(&create_outgoingref_stmt, create_outgoingref_stmt_sql);
 	clean_stmt(&create_outgoingmsg_stmt, create_outgoingmsg_stmt_sql);
 	clean_stmt(&create_outgoingpart_stmt, create_outgoingpart_stmt_sql);
@@ -149,7 +156,11 @@ static int init_statements(void)
 	|| init_stmt(&cnt_all_outgoingpart_stmt, cnt_all_outgoingpart_stmt_sql, sizeof(cnt_all_outgoingpart_stmt_sql))
 	|| init_stmt(&get_payload_stmt, get_payload_stmt_sql, sizeof(get_payload_stmt_sql))
 	|| init_stmt(&get_all_status_stmt, get_all_status_stmt_sql, sizeof(get_all_status_stmt_sql))
-	|| init_stmt(&get_expired_stmt, get_expired_stmt_sql, sizeof(get_expired_stmt_sql));
+	|| init_stmt(&get_expired_stmt, get_expired_stmt_sql, sizeof(get_expired_stmt_sql))
+	|| init_stmt(&pick_mms_message_stmt, pick_mms_message_stmt_sql, sizeof(pick_mms_message_stmt_sql))
+	|| init_stmt(&put_mms_message_stmt, put_mms_message_stmt_sql, sizeof(put_mms_message_stmt_sql))
+	|| init_stmt(&delete_mms_message_stmt, delete_mms_message_stmt_sql, sizeof(delete_mms_message_stmt_sql))
+	|| init_stmt(&clear_mms_message_stmt, clear_mms_message_stmt_sql, sizeof(clear_mms_message_stmt_sql));
 }
 
 static int db_create_smsdb(void)
@@ -176,6 +187,17 @@ static int db_create_smsdb(void)
 		res = -1;
 	}
 	sqlite3_reset(create_index_stmt);
+	ast_mutex_unlock(&dblock);
+
+	if (!create_incoming_mms_stmt) {
+		init_stmt(&create_incoming_mms_stmt, create_incoming_mms_stmt_sql, sizeof(create_incoming_mms_stmt_sql));
+	}
+	ast_mutex_lock(&dblock);
+	if (sqlite3_step(create_incoming_mms_stmt) != SQLITE_DONE) {
+		ast_log(LOG_WARNING, "Couldn't create smsdb table: %s\n", sqlite3_errmsg(smsdb));
+		res = -1;
+	}
+	sqlite3_reset(create_incoming_mms_stmt);
 	ast_mutex_unlock(&dblock);
 
 	if (!create_outgoingref_stmt) {
@@ -297,6 +319,44 @@ static int smsdb_rollback_transaction(void)
 	return res;
 }
 
+/*!
+ * \brief Adds a MMS message to incoming processing queue.
+ * \param imsi -- Received IMSI
+ * \param trx_id -- Transaction id of MMS message
+ * \param location -- Well-formed URL of MMS message
+ * \param subject -- Subject of MMS message
+ * \retval <=0 Error
+ * \retval >0 Current number of messages in the DB
+ */
+EXPORT_DEF int smsdb_mms_put(const char *imsi, const char *trx_id, const char *location, const char *subject)
+{
+	int res = 0;
+
+	smsdb_begin_transaction();
+	if (sqlite3_bind_text(put_mms_message_stmt, 1, imsi, strlen(imsi), SQLITE_STATIC) != SQLITE_OK) {
+		ast_log(LOG_WARNING, "Couldn't imsi key to stmt: %s - %s\n", sqlite3_errmsg(smsdb), imsi);
+		res = -1;
+	} else if (sqlite3_bind_text(put_mms_message_stmt, 2, trx_id, strlen(trx_id), SQLITE_STATIC) != SQLITE_OK) {
+		ast_log(LOG_WARNING, "Couldn't trx_id key to stmt: %s - %s\n", sqlite3_errmsg(smsdb), trx_id);
+		res = -1;
+	} else if (sqlite3_bind_text(put_mms_message_stmt, 3, location, strlen(location), SQLITE_STATIC) != SQLITE_OK) {
+		ast_log(LOG_WARNING, "Couldn't location order to stmt: %s - %s\n", sqlite3_errmsg(smsdb), location);
+		res = -1;
+	} else if (sqlite3_bind_text(put_mms_message_stmt, 4, subject, strlen(subject), SQLITE_STATIC) != SQLITE_OK) {
+		ast_log(LOG_WARNING, "Couldn't subject TTL to stmt: %s - %s\n", sqlite3_errmsg(smsdb), subject);
+		res = -1;
+	}
+
+	if (sqlite3_step(put_mms_message_stmt) != SQLITE_DONE) {
+		ast_log(LOG_WARNING, "Couldn't execute statement: %s\n", sqlite3_errmsg(smsdb));
+		res = -1;
+	}
+
+	sqlite3_reset(put_mms_message_stmt);
+	smsdb_commit_transaction();
+
+	return res;
+}
 
 /*!
  * \brief Adds a message part into the DB and returns the whole message into 'out' when the message is complete.

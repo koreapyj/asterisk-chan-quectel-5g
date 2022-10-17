@@ -135,8 +135,9 @@ EXPORT_DEF int at_enqueue_initialization(struct cpvt *cpvt, at_cmd_t from_comman
 	static const char cmd20[] = "AT+CMGF=0\r";
 	static const char cmd21[] = "AT+CSCS=\"UCS2\"\r";
 
+	/* SMS storage and indicator */
 	static const char cmd22[] = "AT+CPMS=\"SM\",\"SM\",\"SM\"\r";
-	static const char cmd23[] = "AT+CNMI=2,1,0,2,0\r";
+	static const char cmd23[] = "AT+CNMI=2,2,0,2,0\r";
 	static const char cmd24[] = "AT+CSQ\r";
 
 	static const at_queue_cmd_t st_cmds[] = {
@@ -168,10 +169,14 @@ EXPORT_DEF int at_enqueue_initialization(struct cpvt *cpvt, at_cmd_t from_comman
  		ATQ_CMD_DECLARE_STI(CMD_AT_CSCS, cmd21),	/* UCS-2 text encoding */
 
 		ATQ_CMD_DECLARE_ST(CMD_AT_CPMS, cmd22),		/* SMS Storage Selection */
+
+		ATQ_CMD_DECLARE_DYN(CMD_AT_QMMS_INIT),
+
 			/* pvt->initialized = 1 after successful of CMD_AT_CNMI */
 		ATQ_CMD_DECLARE_ST(CMD_AT_CNMI, cmd23),		/* New SMS Notification Setting +CNMI=[<mode>[,<mt>[,<bm>[,<ds>[,<bfr>]]]]] */
 		ATQ_CMD_DECLARE_ST(CMD_AT_CSQ, cmd24),		/* Query Signal quality */
-		};
+	};
+
 	unsigned in, out;
 	int begin = -1;
 	int err;
@@ -203,6 +208,12 @@ EXPORT_DEF int at_enqueue_initialization(struct cpvt *cpvt, at_cmd_t from_comman
 			if(err)
 				goto failure;
 			ptmp1 = cmds[out].data;
+		}
+		if(cmds[out].cmd == CMD_AT_QMMS_INIT) {
+			if (strcmp(CONF_UNIQ(pvt, mms_pdp),"") != 0) {
+				err = at_fill_generic_cmd(&cmds[out], "AT+QIDEACT=%1$s;+QHTTPCFG=\"contextid\",%1$s;+QIACT=%1$s\r", CONF_UNIQ(pvt, mms_pdp));
+				if(err) ast_free(cmds[out].data);
+			}
 		}
 		if(cmds[out].cmd == from_command)
 			begin = out;
@@ -775,6 +786,69 @@ EXPORT_DEF int at_enqueue_retrieve_sms(struct cpvt *cpvt, int index, at_cmd_supp
 error:
 	ast_log (LOG_WARNING, "[%s] SMS command error %d\n", PVT_ID(pvt), err);
 	pvt->incoming_sms_index = -1U;
+	chan_quectel_err = E_UNKNOWN;
+	return -1;
+}
+
+/*!
+ * \brief Enqueue commands for reading MMS
+ * \param cpvt -- cpvt structure
+ * \param mms_trxid
+ * \param mms_url
+ * \return 0 on success
+ */
+EXPORT_DEF int at_enqueue_retrieve_mms(struct cpvt *cpvt, const char *mms_trxid, const char *mms_url, at_cmd_suppress_error_t suppress_error)
+{
+	pvt_t *pvt = cpvt->pvt;
+	int err;
+	at_queue_cmd_t cmds[] = {
+		ATQ_CMD_DECLARE_DYN2(CMD_AT_QHTTPURL, RES_CONNECT),
+		ATQ_CMD_DECLARE_DYN2(CMD_USER, RES_OK),
+		ATQ_CMD_DECLARE_DYN2(CMD_AT_QHTTPGET, RES_OK),
+		// ATQ_CMD_DECLARE_DYN2(CMD_AT_QHTTPREAD, RES_QHTTPGET),
+	};
+	unsigned cmdsno = ITEMS_OF(cmds);
+
+	ast_verb (1, "[%s] %s initializing... %s\n", PVT_ID(pvt), __func__, mms_url);
+	if (suppress_error == SUPPRESS_ERROR_ENABLED) {
+		cmds[0].flags |= ATQ_CMD_FLAG_SUPPRESS_ERROR;
+	}
+
+	/* check if message is already being received */
+	if (pvt->incoming_mms_trx_id != NULL) {
+		ast_verb (1, "[%s] %s: MMS retrieve of [%s] already in progress\n",
+			PVT_ID(pvt), __func__, pvt->incoming_mms_trx_id);
+		return 0;
+	}
+
+	pvt->incoming_mms_trx_id = mms_trxid;
+	pvt->connect_reply = mms_url;
+
+	err = at_fill_generic_cmd (&cmds[0], "AT+QHTTPURL=%d,5\r", strlen(mms_url));
+	if (err)
+		goto error;
+
+	err = at_fill_generic_cmd (&cmds[1], "%s\r", mms_url);
+	if (err)
+		goto error;
+
+	err = at_fill_generic_cmd (&cmds[2], "AT+QHTTPGET=5\r");
+	if (err)
+		goto error;
+
+	/* Todo: free incoming mms pvt values */
+	ast_verb(10, "[%s] %s: Send AT+QHTTPGET req");
+
+	err = at_queue_insert (cpvt, cmds, cmdsno, 0);
+	if (err)
+		goto error;
+	return 0;
+error:
+	ast_log (LOG_WARNING, "[%s] MMS command error %d\n", PVT_ID(pvt), err);
+	ast_free(pvt->incoming_mms_trx_id);
+	ast_free(pvt->connect_reply);
+	pvt->incoming_mms_trx_id = NULL;
+	pvt->connect_reply = NULL;
 	chan_quectel_err = E_UNKNOWN;
 	return -1;
 }

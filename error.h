@@ -33,7 +33,10 @@ enum error {
 	E_INVALID_CHARSET,
 	E_BUILD_SCA,
 	E_BUILD_PHONE_NUMBER,
-	E_2BIG
+	E_2BIG,
+	E_PARSE_CMT_LINE,
+	E_PARSE_QHTTPGET_LINE,
+	E_QHTTP
 };
 
 INLINE_DECL const char *error2str(int err)
@@ -42,7 +45,8 @@ INLINE_DECL const char *error2str(int err)
 		"Unknown error", "Device disbaled", "Device not found", "Device disconnected", "Invalid USSD", "Invalid phone number",
 		"Cannot parse UTF-8", "Cannot parse UCS-2", "Cannot encode GSM7", "Cannot pack GSM7", "Cannot decode GSM7", "SMSDB error", "Queue error", "PDU building error",
 		"Can't parse +CMGR response line", "Parsing messages in TEXT mode is not supported anymore; This message should never appear. Nevertheless, if this message appears, please report on GitHub.",
-		"Invalid TPDU length in CMGR PDU status line", "Malformed hex string", "Invalid SCA", "Invalid TPDU type", "Cannot parse TPDU", "Invalid timestamp", "Invalid charset", "Cannot build SCA", "Cannot build phone number", "Input too large"
+		"Invalid TPDU length in CMGR PDU status line", "Malformed hex string", "Invalid SCA", "Invalid TPDU type", "Cannot parse TPDU", "Invalid timestamp", "Invalid charset", "Cannot build SCA", "Cannot build phone number", "Input too large",
+		"E_PARSE_CMT_LINE", "E_PARSE_QHTTPGET_LINE", "E_QHTTP"
 	};
 	return enum2str(err, errors, ITEMS_OF(errors));
 }

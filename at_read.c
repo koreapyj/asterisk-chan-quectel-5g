@@ -102,17 +102,19 @@ EXPORT_DEF ssize_t at_read (int fd, const char * dev, struct ringbuffer* rb)
 	return n;
 }
 
-EXPORT_DEF int at_read_result_iov (const char * dev, int * read_result, struct ringbuffer* rb, struct iovec iov[2])
+EXPORT_DEF int at_read_result_iov (struct pvt *pvt, int * read_result, struct ringbuffer* rb, struct iovec iov[2])
 {
+	char dev[sizeof(PVT_ID(pvt))];
+	ast_copy_string(dev, PVT_ID(pvt), sizeof(dev));
 	int	iovcnt = 0;
 	int	res;
 	size_t	s;
 
 	s = rb_used (rb);
+	ast_verb (100, "[%s] %s used=%d read_result=%d str=\"%.*s\"\n", dev, __func__, s, *read_result, s, (char*)rb->buffer + rb->read);
 	if (s > 0)
 	{
-/*		ast_debug (5, "[%s] d_read_result %d len %d input [%.*s]\n", dev, *read_result, s, MIN(s, rb->size - rb->read), (char*)rb->buffer + rb->read);
-*/
+		ast_verb (100, "[%s] %s: len=%4$d input=\"%.*s\"\n", dev, __func__, s, *read_result, (char*)rb->buffer + rb->read);
 
 		if (*read_result == 0)
 		{
@@ -122,23 +124,22 @@ EXPORT_DEF int at_read_result_iov (const char * dev, int * read_result, struct r
 				rb_read_upd (rb, 1);
 				*read_result = 1;
 
-				return at_read_result_iov (dev, read_result, rb, iov);
+				return at_read_result_iov (pvt, read_result, rb, iov);
 			}
 			else if (res == 0)
 			{
 				rb_read_upd (rb, 2);
 				*read_result = 1;
 
-				return at_read_result_iov (dev, read_result, rb, iov);
+				return at_read_result_iov (pvt, read_result, rb, iov);
 			}
 			else if (res > 0)
 			{
 				if (rb_memcmp (rb, "\n", 1) == 0)
 				{
-					ast_debug (5, "[%s] multiline response\n", dev);
 					rb_read_upd (rb, 1);
 
-					return at_read_result_iov (dev, read_result, rb, iov);
+					return at_read_result_iov (pvt, read_result, rb, iov);
 				}
 
 				if (rb_read_until_char_iov (rb, iov, '\r') > 0)
@@ -148,13 +149,14 @@ EXPORT_DEF int at_read_result_iov (const char * dev, int * read_result, struct r
 
 				rb_read_upd (rb, s);
 
-				return at_read_result_iov (dev, read_result, rb, iov);
+				return at_read_result_iov (pvt, read_result, rb, iov);
 			}
 
 			return 0;
 		}
 		else
 		{
+			ast_verb (100, "[%s] %s: Comparing ..\n", dev, __func__);
 			if (rb_memcmp (rb, "+CSSI:", 6) == 0)
 			{
 				iovcnt = rb_read_n_iov (rb, iov, 8);
@@ -167,13 +169,37 @@ EXPORT_DEF int at_read_result_iov (const char * dev, int * read_result, struct r
 			}
 			else if (rb_memcmp (rb, "\r\n+CSSU:", 8) == 0 || rb_memcmp (rb, "\r\n+CMS ERROR:", 13) == 0 || rb_memcmp (rb, "\r\n+CMGS:", 8) == 0 || rb_memcmp (rb, "\r\nOK", 4) == 0)
 			{
+				ast_verb (100, "[%s] %s: OK matched\n", dev, __func__);
 				rb_read_upd (rb, 2);
-				return at_read_result_iov (dev, read_result, rb, iov);
+				return at_read_result_iov (pvt, read_result, rb, iov);
 			}
 			else if (rb_memcmp (rb, "> ", 2) == 0)
 			{
 				*read_result = 0;
 				return rb_read_n_iov (rb, iov, 2);
+			}
+			else if (rb_memcmp (rb, "+CMT:", 5) == 0 || (rb_memcmp (rb, "CONNECT", 7) == 0 && pvt->connect_length > 0))
+			{
+				char *endptr;
+				if(rb_memcmp (rb, "+CMT:", 5) == 0) {
+					int len = strtol(memchr(rb->buffer + rb->read, ',', rb->used) + 1, &endptr, 10);
+					s = (size_t)memchr(rb->buffer + rb->read, '\n', rb->used) - (size_t)(rb->buffer + rb->read) + (len+8)*2 + 2;
+					ast_verb (100, "[%s] %s: +CMT matched. read %d bytes (len=%d)\n", dev, __func__, s, len);
+				}
+				else if(rb_memcmp (rb, "CONNECT", 7) == 0) {
+					s = (size_t)memchr(rb->buffer + rb->read, '\n', rb->used) - (size_t)(rb->buffer + rb->read) + pvt->connect_length + 1;
+					ast_verb (100, "[%s] %s: CONNECT matched. read %d bytes (%d)\n", dev, __func__, s, pvt->connect_length);
+				}
+				else {
+					ast_verb (100, "[%s] %s: none matched. read %d bytes (%d)\n", dev, __func__, s);
+				}
+				iovcnt = rb_read_n_iov (rb, iov, s);
+				if (iovcnt > 0)
+				{
+					*read_result = 0;
+				}
+				ast_verb (100, "[%s] %s: +CMT/CONNECT return %d bytes (read_result=%d)\n", dev, __func__, iov[0].iov_len + iov[1].iov_len + 1, *read_result);
+				return iovcnt;
 			}
 			else if (rb_memcmp (rb, "+CMGR:", 6) == 0 || rb_memcmp (rb, "+CNUM:", 6) == 0 || rb_memcmp (rb, "ERROR+CNUM:", 11) == 0 || rb_memcmp (rb, "+CLCC:", 6) == 0)
 			{
@@ -187,7 +213,10 @@ EXPORT_DEF int at_read_result_iov (const char * dev, int * read_result, struct r
 			}
 			else
 			{
+				ast_verb (100, "[%s] %s: General matched (rb=0x%02x,iov_len=0x%02x)\n", dev, __func__, rb, rb->size - rb->read);
 				iovcnt = rb_read_until_mem_iov (rb, iov, "\r\n", 2);
+				ast_verb (100, "[%s] %s: rb_read_until_mem_iov returned (rb=0x%02x,iov_len=0x%02x, iovcnt=%d)\n", dev, __func__, rb, rb->size - rb->read, iovcnt);
+				ast_verb (100, "[%s] %s: \"%.*s\"\n", dev, __func__, iov[0].iov_len + iov[1].iov_len + 1, (char*)rb->buffer + rb->read);
 				if (iovcnt > 0)
 				{
 					*read_result = 0;
@@ -207,6 +236,7 @@ EXPORT_DEF at_res_t at_read_result_classification (struct ringbuffer * rb, size_
 	at_res_t at_res = RES_UNKNOWN;
 	unsigned idx;
 
+	ast_verb (100, "%s: at_responses .ids_first=%d .ids=%d .name_first=%d .name=%d", __func__, at_responses.ids_first, at_responses.ids, at_responses.name_first, at_responses.name_last);
 	for(idx = at_responses.ids_first; idx < at_responses.ids; idx++)
 	{
 		if (rb_memcmp (rb, at_responses.responses[idx].id, at_responses.responses[idx].idlen) == 0)
@@ -216,6 +246,7 @@ EXPORT_DEF at_res_t at_read_result_classification (struct ringbuffer * rb, size_
 		}
 	}
 
+	ast_verb (100, "%s: %d (%s) matched (len=%d)", __func__, at_res, at_res2str (at_res), len);
 	switch (at_res)
 	{
 		case RES_SMS_PROMPT:
@@ -236,8 +267,7 @@ EXPORT_DEF at_res_t at_read_result_classification (struct ringbuffer * rb, size_
 
 	rb_read_upd (rb, len);
 
-/*	ast_debug (5, "receive result '%s'\n", at_res2str (at_res));
-*/
+	ast_verb (100, "%s: receive result at_res=%d (%s) str=\"%.*s\"\n", __func__, at_res, at_res2str (at_res), len, (char*)rb->buffer + rb->read);
 
 	return at_res;
 }

@@ -115,8 +115,9 @@ typedef struct dc_uconfig
 	char			data_tty[DEVPATHLEN];		/*!< tty for AT commands */
 	char			imei[IMEI_SIZE+1];		/*!< search device by imei */
 	char			imsi[IMSI_SIZE+1];		/*!< search device by imsi */
-        char                    quec_uac[2];
-        char			alsadev[DEVNAMELEN];
+	char                    quec_uac[2];
+	char			alsadev[DEVNAMELEN];
+	char			mms_pdp[3];
 } dc_uconfig_t;
 
 /* all Config settings join in one place */

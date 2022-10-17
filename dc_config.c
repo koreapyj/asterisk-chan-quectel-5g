@@ -35,13 +35,15 @@ static int dc_uconfig_fill(struct ast_config * cfg, const char * cat, struct dc_
 	const char * imsi;
 	const char * quec_uac;
 	const char * alsadev;
+	const char * mms_pdp;
 
 	audio_tty = ast_variable_retrieve (cfg, cat, "audio");
 	data_tty  = ast_variable_retrieve (cfg, cat, "data");
 	imei = ast_variable_retrieve (cfg, cat, "imei");
 	imsi = ast_variable_retrieve (cfg, cat, "imsi");
-        quec_uac = ast_variable_retrieve (cfg, cat, "quec_uac");
-        alsadev = ast_variable_retrieve (cfg, cat, "alsadev");
+	quec_uac = ast_variable_retrieve (cfg, cat, "quec_uac");
+	alsadev = ast_variable_retrieve (cfg, cat, "alsadev");
+	mms_pdp = ast_variable_retrieve (cfg, cat, "mms_pdp");
 
 	if(imei && strlen(imei) != IMEI_SIZE) {
 		ast_log (LOG_WARNING, "[%s] Ignore invalid IMEI value '%s'\n", cat, imei);
@@ -77,6 +79,7 @@ static int dc_uconfig_fill(struct ast_config * cfg, const char * cat, struct dc_
 	ast_copy_string (config->imsi,		S_OR(imsi, ""),	     sizeof (config->imsi));
 	ast_copy_string (config->quec_uac,	S_OR(quec_uac, ""),  sizeof (config->quec_uac));
 	ast_copy_string (config->alsadev,	S_OR(alsadev, ""),   sizeof (config->alsadev));
+	ast_copy_string (config->mms_pdp,	S_OR(mms_pdp, ""),   sizeof (config->mms_pdp));
 
 	return 0;
 }

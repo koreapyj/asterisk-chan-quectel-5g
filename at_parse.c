@@ -439,6 +439,123 @@ EXPORT_DEF int at_parse_cmgr(char *str, size_t len, int *tpdu_type, char *sca, s
 }
 
 /*!
+ * \brief Parse a CMT message
+ * \param str -- pointer to pointer of string to parse (null terminated)
+ * \param len -- string lenght
+ * \param number -- a pointer to a char pointer which will store the from number
+ * \param text -- a pointer to a char pointer which will store the message text
+ * @note str will be modified when the CMT message is parsed
+ * \retval  0 success
+ * \retval -1 parse error
+ */
+
+EXPORT_DEF int at_parse_cmt(char *str, size_t len, int *tpdu_type, char *sca, size_t sca_len, char *oa, size_t oa_len, char *scts, int *mr, int *st, char *dt, char *msg, size_t *msg_len, pdu_udh_t *udh)
+{
+	fprintf(stderr, "\r\nat_parse_cmt: \"%*s\"", len, str);
+	/* skip "+CMT:" */
+	str += 5;
+	len -= 5;
+
+	/* skip leading spaces */
+	while (len > 0 && *str == ' ') {
+		++str;
+		--len;
+	}
+
+	if (len <= 0) {
+		chan_quectel_err = E_PARSE_CMT_LINE;
+		return -1;
+	}
+
+	/*
+	* parse cmt info in the following PDU format
+	* +CMT: [address_text],TPDU_length<CR><LF>
+	* SMSC_number_and_TPDU<CR><LF><CR><LF>
+	*
+	*	sample
+	* +CMT: ,31
+	* 07911234567890F3040B911234556780F20008012150220040210C041F04400438043204350442<CR><LF><CR><LF>
+	*/
+
+	char delimiters[] = ",\n";
+	char *marks[STRLEN(delimiters)];
+	char *end;
+	size_t tpdu_length;
+	int16_t msg16_tmp[256];
+
+	if (mark_line(str, delimiters, marks) != ITEMS_OF(marks)) {
+		chan_quectel_err = E_PARSE_CMT_LINE;
+		fprintf(stderr, "\r\nat_parse_cmt: E_PARSE_CMT_LINE");
+	}
+	tpdu_length = strtol(marks[0] + 1, &end, 10);
+	fprintf(stderr, "\r\nat_parse_cmt: tpdu_length (%d) %d", tpdu_length, end[0]);
+	if (tpdu_length <= 0 || end[0] != '\r') {
+		chan_quectel_err = E_INVALID_TPDU_LENGTH;
+		fprintf(stderr, "\r\nat_parse_cmt: E_INVALID_TPDU_LENGTH");
+		return -1;
+	}
+	str = marks[1] + 1;
+	fprintf(stderr, "\r\nat_parse_cmt: str (%s)", str);
+
+	int pdu_length = (unhex(str, str) + 1) / 2;
+	if (pdu_length < 0) {
+		chan_quectel_err = E_MALFORMED_HEXSTR;
+		fprintf(stderr, "\r\nat_parse_cmt: E_MALFORMED_HEXSTR");
+		return -1;
+	}
+	int res, i = 0;
+	fprintf(stderr, "\r\nat_parse_cmt: pdu_parse_sca call");
+	res = pdu_parse_sca(str + i, pdu_length - i, sca, sca_len);
+	fprintf(stderr, "\r\nat_parse_cmt: pdu_parse_sca done (%d)", res);
+	if (res < 0) {
+		/* tpdu_parse_sca sets chan_quectel_err */
+		return -1;
+	}
+	i += res;
+	if (tpdu_length > pdu_length - i) {
+		chan_quectel_err = E_INVALID_TPDU_LENGTH;
+		return -1;
+	}
+	fprintf(stderr, "\r\nat_parse_cmt: tpdu_parse_type call");
+	res = tpdu_parse_type(str + i, pdu_length - i, tpdu_type);
+	fprintf(stderr, "\r\nat_parse_cmt: tpdu_parse_type done (%d)", res);
+	if (res < 0) {
+		/* tpdu_parse_type sets chan_quectel_err */
+		return -1;
+	}
+	i += res;
+	switch (PDUTYPE_MTI(*tpdu_type)) {
+	case PDUTYPE_MTI_SMS_STATUS_REPORT:
+		fprintf(stderr, "\r\nat_parse_cmt: PDUTYPE_MTI_SMS_STATUS_REPORT");
+		res = tpdu_parse_status_report(str + i, pdu_length - i, mr, oa, oa_len, scts, dt, st);
+		if (res < 0) {
+			/* tpdu_parse_status_report sets chan_quectel_err */
+			return -1;
+		}
+		break;
+	case PDUTYPE_MTI_SMS_DELIVER:
+		fprintf(stderr, "\r\nat_parse_cmt: PDUTYPE_MTI_SMS_DELIVER");
+		fprintf(stderr, "\r\nat_parse_cmt: tpdu_parse_deliver call (?, %d, PDUTYPE_MTI_SMS_DELIVER) at %d", pdu_length - i, i);
+		res = tpdu_parse_deliver(str + i, pdu_length - i, *tpdu_type, oa, oa_len, scts, msg, udh);
+		fprintf(stderr, "\r\nat_parse_cmt: tpdu_parse_deliver done (%d)", res);
+		if (res < 0) {
+			/* tpdu_parse_deliver sets chan_quectel_err */
+			fprintf(stderr, "\r\nat_parse_cmt: tpdu_parse_deliver failed: %d (%s)", chan_quectel_err, error2str(chan_quectel_err));
+			return -1;
+		}
+		*msg_len = res;
+		msg[res] = '\0';
+		fprintf(stderr, "\r\nat_parse_cmt: msg parse done \"%s\"", msg);
+		break;
+	default:
+		chan_quectel_err = E_INVALID_TPDU_TYPE;
+		return -1;
+	}
+	fprintf(stderr, "\r\nat_parse_cmt: success");
+	return 0;
+}
+
+/*!
  * \brief Parse a +CMGS notification
  * \param str -- string to parse (null terminated)
  * \return -1 on error (parse error) or the first integer value found
@@ -622,6 +739,86 @@ EXPORT_DEF int at_parse_csca(char* str, char ** csca)
 	}
 
 	return -1;
+}
+
+#/* */
+EXPORT_DEF int at_parse_qhttpget(char* str)
+{
+	/* skip "+QHTTPGET:" */
+	str += 10;
+
+	/* skip leading spaces */
+	while (*str == ' ' && *str != '\0') {
+		++str;
+	}
+
+	/*
+	 * Parse QHTTPGET result:
+	 * +QHTTPGET: 0,200,892
+	 * +QHTTPGET: <error>,<response_code>,<response_length>
+	 */
+	int error = 0, response_code = 0, response_len = 0;
+	sscanf(str, "%d,%d,%d", &error, &response_code, &response_len);
+
+	if(error) {
+		ast_log(LOG_ERROR, "HTTP request error: QHTTPGET %d", error);
+		chan_quectel_err = E_QHTTP;
+		return -1;
+	}
+
+	if(response_code < 200 || response_code >= 300) {
+		ast_log(LOG_ERROR, "HTTP request error: HTTP %d", response_code);
+		chan_quectel_err = E_QHTTP;
+		return -1;
+	}
+
+	if(response_len <= 0) {
+		ast_log(LOG_ERROR, "HTTP request error: EMPTY_RESPONSE");
+		chan_quectel_err = E_QHTTP;
+		return -1;
+	}
+
+	return response_len;
+}
+
+#/* */
+EXPORT_DEF int at_parse_qhttpread(char* str)
+{
+	/* skip "+QHTTPREAD:" */
+	str += 11;
+
+	/* skip leading spaces */
+	while (*str == ' ' && *str != '\0') {
+		++str;
+	}
+
+	/*
+	 * Parse QHTTPREAD result:
+	 * +QHTTPREAD: 0
+	 * +QHTTPREAD: <error>
+	 */
+	int error = 0;
+	sscanf(str, "%d", &error);
+
+	if(error) {
+		ast_log(LOG_ERROR, "HTTP request error: QHTTPREAD %d", error);
+		chan_quectel_err = E_QHTTP;
+		return -1;
+	}
+
+	return error;
+}
+
+#/* */
+EXPORT_DEF int at_parse_mms_pdu(const char* str, int len, char *oa, char *mms_trxid, char *msg)
+{
+	if(mms_parse(str, len, oa, mms_trxid, NULL, msg) < 0) return -1;
+
+	char *pos = memchr(oa, '/', strlen(oa));
+	if(pos != NULL) {
+		pos[0] = '\0';
+	}
+	return 0;
 }
 
 #/* */

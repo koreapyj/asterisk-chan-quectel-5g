@@ -476,6 +476,8 @@ static void disconnect_quectel (struct pvt* pvt)
 	pvt->cwaiting = 0;
 	pvt->outgoing_sms = 0;
 	pvt->incoming_sms_index = -1U;
+	pvt->incoming_mms_trx_id = NULL;
+	pvt->connect_reply = NULL;
 	pvt->volume_sync_step = VOLUME_SYNC_BEGIN;
 
 	pvt->current_state = DEV_STATE_STOPPED;
@@ -686,12 +688,15 @@ static void* do_monitor_phone (void* data)
 		PVT_STAT(pvt, d_read_bytes) += iovcnt;
 		ast_mutex_unlock (&pvt->lock);
 
-		while ((iovcnt = at_read_result_iov (dev, &read_result, &rb, iov)) > 0)
+		ast_verb (100, "[%s] at_read_result_iov\n", dev);
+		while ((iovcnt = at_read_result_iov (pvt, &read_result, &rb, iov)) > 0)
 		{
+			ast_verb (100, "[%s] at_read_result_classification\n", dev);
 			at_res = at_read_result_classification (&rb, iov[0].iov_len + iov[1].iov_len);
 
 			ast_mutex_lock (&pvt->lock);
 			PVT_STAT(pvt, at_responses) ++;
+			ast_verb (100, "[%s] %s: classified\n", dev, __func__);
 			if (at_response (pvt, iov, iovcnt, at_res) || at_queue_run(pvt))
 			{
 				goto e_cleanup;
@@ -1461,6 +1466,10 @@ EXPORT_DEF const char* pvt_str_state(const struct pvt* pvt)
 			state = "Held";
 		else if(pvt->outgoing_sms || pvt->incoming_sms_index != -1U)
 			state = "SMS";
+		else if(pvt->incoming_mms_trx_id != NULL)
+			state = "MMS";
+		else if(pvt->connect_reply != NULL)
+			state = "Data";
 		else
 			state = "Free";
 	}
@@ -1502,6 +1511,9 @@ EXPORT_DEF struct ast_str* pvt_str_state_ex(const struct pvt* pvt)
 
 		if(pvt->outgoing_sms)
 			ast_str_append (&buf, 0, "Outgoing SMS");
+
+		if(pvt->incoming_mms_trx_id != NULL)
+			ast_str_append (&buf, 0, "Incoming MMS ");
 
 		if(ast_str_strlen(buf) == 0)
 		{
@@ -1656,7 +1668,10 @@ static struct pvt * pvt_create(const pvt_config_t * settings)
 		pvt->data_fd			= -1;
 		pvt->timeout			= DATA_READ_TIMEOUT;
 		pvt->gsm_reg_status		= -1;
-		pvt->incoming_sms_index		= -1U;
+		pvt->incoming_sms_index = -1U;
+		pvt->incoming_mms_trx_id= NULL;
+		pvt->connect_reply		= NULL;
+		pvt->connect_length		= -1;
 
 		ast_copy_string (pvt->provider_name, "NONE", sizeof (pvt->provider_name));
 		ast_copy_string (pvt->subscriber_number, "Unknown", sizeof (pvt->subscriber_number));
@@ -1682,7 +1697,7 @@ static int pvt_time4restate(const struct pvt * pvt)
 {
 	if(pvt->desired_state != pvt->current_state)
 	{
-		if(pvt->restart_time == RESTATE_TIME_NOW || (PVT_NO_CHANS(pvt) && !pvt->outgoing_sms && pvt->incoming_sms_index == -1U))
+		if(pvt->restart_time == RESTATE_TIME_NOW || (PVT_NO_CHANS(pvt) && !pvt->outgoing_sms && pvt->incoming_sms_index == -1U && pvt->incoming_mms_trx_id == NULL && pvt->connect_reply == NULL))
 			return 1;
 	}
 	return 0;

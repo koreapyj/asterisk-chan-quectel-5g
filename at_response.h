@@ -24,6 +24,7 @@ struct iovec;
 	_( CMGR,        "+CMGR",        "+CMGR:") \
 	_( CMS_ERROR,   "+CMS ERROR",   "+CMS ERROR:") \
 	_( CMTI,        "+CMTI",        "+CMTI:") \
+	_( CMT,         "+CMT",         "+CMT:") \
 	_( CDSI,        "+CDSI",        "+CDSI:") \
 \
 	_( CNUM,        "+CNUM",        "+CNUM:") \
@@ -64,6 +65,10 @@ struct iovec;
 	_( CLCC,        "+CLCC",        "+CLCC:") \
 	_( RCEND,       "CALLEND",      "REMOTE CALL END") \
 	_( CCWA,        "+CCWA",        "+CCWA:") \
+\
+	_( CONNECT,     "CONNECT",      "CONNECT\r") \
+	_( QHTTPGET,    "+QHTTPGET",    "+QHTTPGET:") \
+	_( QHTTPREAD,   "+QHTTPREAD",   "+QHTTPREAD:") \
 /* AT_RESPONSES_TABLE */
 
 
@@ -76,7 +81,7 @@ typedef enum {
 
 	/* Hackish way to maintain MAX and MIN responses for compatibility */
 	RES_MIN = RES_PARSE_ERROR,
-	RES_MAX = RES_CCWA,
+	RES_MAX = RES_QHTTPREAD,
 } at_res_t;
 
 /*! response description */

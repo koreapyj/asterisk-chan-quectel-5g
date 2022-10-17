@@ -5,6 +5,7 @@
 #include "ast_config.h"
 
 #include <errno.h>			/* EINVAL ENOMEM E2BIG */
+#include <string.h>
 
 #include "pdu.h"
 #include "helpers.h"			/* dial_digit_code() */
@@ -274,6 +275,8 @@ EXPORT_DEF void pdu_udh_init(pdu_udh_t *udh)
 	udh->order = 0;
 	udh->ss = 0;
 	udh->ls = 0;
+	udh->src_port = 0;
+	udh->dst_port = 0;
 }
 
 #/* get digit code, 0 if invalid  */
@@ -717,11 +720,13 @@ EXPORT_DEF int tpdu_parse_deliver(uint8_t *pdu, size_t pdu_length, int tpdu_type
 	oa_digits = pdu[i++];
 
 	field_len = pdu_parse_number(pdu + i, pdu_length - i, oa_digits, oa, oa_len);
+	ast_verb (10, "tpdu_parse_deliver: pdu_parse_number done (%s)", oa);
 	if (field_len < 0) {
 		chan_quectel_err = E_INVALID_PHONE_NUMBER;
 		return -1;
 	}
 	i += field_len;
+	ast_verb (10, "tpdu_parse_deliver: byte shift to %d", i);
 
 	if (i + 2 + 7 + 1 > pdu_length) {
 		chan_quectel_err = E_UNKNOWN;
@@ -729,9 +734,13 @@ EXPORT_DEF int tpdu_parse_deliver(uint8_t *pdu, size_t pdu_length, int tpdu_type
 	}
 
 	pid = pdu[i++];
+	ast_verb (10, "tpdu_parse_deliver: pid 0x%02x", pid);
 	dcs = pdu[i++];
+	ast_verb (10, "tpdu_parse_deliver: dcs 0x%02x", dcs);
 	i += pdu_parse_timestamp(pdu + i, pdu_length - i, scts);
+	ast_verb (10, "tpdu_parse_deliver: scts 0x%x", scts);
 	udl = pdu[i++];
+	ast_verb (10, "tpdu_parse_deliver: udl 0x%02x", udl);
 
 	if (pid != PDU_PID_SMS && !(0x41 <= pid && pid <= 0x47) /* PDU_PID_SMS_REPLACE_MASK */) {
 		/* 3GPP TSS 23.040 v14.0.0 (2017-013) */
@@ -814,12 +823,6 @@ EXPORT_DEF int tpdu_parse_deliver(uint8_t *pdu, size_t pdu_length, int tpdu_type
 			return -1;
 		}
 	}
-	if (alphabet == PDU_DCS_ALPHABET_8BIT) {
-		// TODO: What to do with binary messages? Are there any?
-		// Return an error as it is dangerous to forward the raw binary data as text
-		chan_quectel_err = E_INVALID_CHARSET;
-		return -1;
-	}
 
 	/* calculate number of octets in UD */
 	int udl_nibbles;
@@ -839,6 +842,7 @@ EXPORT_DEF int tpdu_parse_deliver(uint8_t *pdu, size_t pdu_length, int tpdu_type
 			return -1;
 		}
 		udhl = pdu[i++];
+		ast_verb (10, "tpdu_parse_deliver: udhl 0x%02x", udhl);
 
 		/* adjust 7-bit padding */
 		if (alphabet == PDU_DCS_ALPHABET_7BIT) {
@@ -857,9 +861,11 @@ EXPORT_DEF int tpdu_parse_deliver(uint8_t *pdu, size_t pdu_length, int tpdu_type
 
 			/* get type byte */
 			iei_type = pdu[i++];
+			ast_verb (10, "tpdu_parse_deliver: iei_type 0x%02x", iei_type);
 
 			/* get length byte */
 			iei_len = pdu[i++];
+			ast_verb (10, "tpdu_parse_deliver: iei_len 0x%02x", iei_len);
 
 			/* subtract bytes */
 			udhl -= 2;
@@ -875,6 +881,17 @@ EXPORT_DEF int tpdu_parse_deliver(uint8_t *pdu, size_t pdu_length, int tpdu_type
 					udh->parts = pdu[i++];
 					udh->order = pdu[i++];
 					udhl -= 3;
+					break;
+				case 0x05: /* Application Port Addressing, 16 bit */
+					if (iei_len != 4) {
+						chan_quectel_err = E_UNKNOWN;
+						return -1;
+					}
+					udh->dst_port = (pdu[i++]<<8) | pdu[i++];
+					udh->src_port = (pdu[i++]<<8) | pdu[i++];
+					/* WAP-259-WDP-20010614 */
+					ast_verb (10, "tpdu_parse_deliver: WDP discovered, 16 bit (dst %d, src %d)", udh->dst_port, udh->src_port);
+					udhl -= 4;
 					break;
 				case 0x08: /* Concatenated, 16 bit ref */
 					if (iei_len != 4) {
@@ -903,9 +920,11 @@ EXPORT_DEF int tpdu_parse_deliver(uint8_t *pdu, size_t pdu_length, int tpdu_type
 					break;
 				default:
 					/* skip rest of IEI */
+					ast_verb (10, "tpdu_parse_deliver: Unknown header 0x%x skipping", iei_type);
 					i += iei_len;
 					udhl -= iei_len;
 				}
+				ast_verb (10, "tpdu_parse_deliver: udhl 0x%02x", udhl);
 			} else {
 				chan_quectel_err = E_UNKNOWN;
 				return -1;
@@ -916,19 +935,387 @@ EXPORT_DEF int tpdu_parse_deliver(uint8_t *pdu, size_t pdu_length, int tpdu_type
 		i += udhl;
 	}
 
-	int msg_len = pdu_length - i, out_len;
-	if (alphabet == PDU_DCS_ALPHABET_7BIT) {
-		out_len = gsm7_unpack_decode(pdu + i, udl_nibbles, msg, 1024 /* assume enough memory, as SMS messages are limited in size */, msg_padding, udh->ls, udh->ss);
-		if (out_len < 0) {
-			chan_quectel_err = E_DECODE_GSM7;
+	int msg_len = pdu_length - i, out_len = 0;
+	char hexbuf[4096];
+	int is_ucs = 1;
+	switch(alphabet) {
+		case PDU_DCS_ALPHABET_7BIT:
+			out_len = gsm7_unpack_decode(pdu + i, udl_nibbles, msg, 1024 /* assume enough memory, as SMS messages are limited in size */, msg_padding, udh->ls, udh->ss);
+			if (out_len < 0) {
+				chan_quectel_err = E_DECODE_GSM7;
+				return -1;
+			}
+			break;
+		case PDU_DCS_ALPHABET_8BIT:
+			is_ucs = 0;
+			hexify(pdu + i, msg_len, msg);
+			ast_verb (10, "tpdu_parse_deliver: DCS binary data %s", msg);
+			out_len = msg_len * 2;
+			break;
+		default:
+			out_len = msg_len / 2;
+			memcpy((char*)msg, pdu + i, msg_len);
+			msg[out_len] = '\0';
+			break;
+	}
+
+	if(is_ucs) {
+		int res;
+		char msg16_tmp[256];
+		memcpy((char*)msg16_tmp, msg, msg_len);
+		msg16_tmp[msg_len] = '\0';
+		ast_verb (10, "tpdu_parse_deliver: ucs2_to_utf8 call (\"\\x%x\\x%x\\x%x\\x%x\\x%x\\x%x\\x%x\\x%x\",%d,*,%d)", msg16_tmp[0], msg16_tmp[1], msg16_tmp[2], msg16_tmp[3], msg16_tmp[4], msg16_tmp[5], msg16_tmp[6], msg16_tmp[7], msg_len, out_len);
+		res = ucs2_to_utf8(msg16_tmp, out_len, msg, out_len+1);
+		ast_verb (10, "tpdu_parse_deliver: ucs2_to_utf8 done (%d) %d", res);
+		if (res < 0) {
+			chan_quectel_err = E_PARSE_UCS2;
+			ast_verb (10, "tpdu_parse_deliver: E_PARSE_UCS2");
 			return -1;
 		}
-	} else {
-		out_len = msg_len / 2;
-		memcpy((char*)msg, pdu + i, msg_len);
-		msg[out_len] = '\0';
+		out_len = res;
 	}
-	msg[out_len] = '\0';
 
+	msg[out_len] = '\0';
 	return out_len;
+}
+
+size_t __wsp_parse_unknown(uint8_t *ptr, size_t len, uint32_t *outptr) {
+	size_t header_len = 0;
+	size_t header_offset = 0;
+	int header_val = 0;
+
+	/* Well-known header */
+	if(ptr[0] & 0x80) {
+		header_len = 1;
+	}
+	/* Variable length header */
+	else {
+		/* Long length */
+		if(ptr[0] == 0x1f) {
+			header_offset = 1;
+		}
+		header_len = ptr[header_offset++];
+	}
+
+	ast_verb (10, "%s: MMS PDU header %02x: unknown(%3$x)", __func__, ptr[-1], header_len, ptr[header_offset], header_len>1?"..":"");
+	return header_len + header_offset;
+}
+
+size_t __wsp_parse_uint_variable(uint8_t *ptr, size_t len, uint32_t *outptr) {
+	size_t header_len = 0;
+	size_t header_offset = 0;
+	uint32_t header_val = 0;
+
+	do {
+		header_val <<= 7;
+		header_val |= ptr[header_len] & 0x7f;
+		ast_verb (10, "%s: MMS PDU header %02x: %02x, %02x", __func__, ptr[-1], ptr[header_len], header_val);
+		if(header_len>len) return -1;
+	} while(ptr[header_len++] & 0x80);
+
+	if(outptr) {
+		*outptr = header_val;
+	}
+	ast_verb (10, "%s: MMS PDU header %02x: uint(%x) %x", __func__, ptr[-1], header_len, header_val);
+	return header_len + header_offset;
+}
+
+size_t __wsp_parse_long_integer(uint8_t *ptr, size_t len, uint32_t *outptr) {
+	size_t header_len = 0;
+	size_t header_offset = 0;
+	int header_val = 0;
+
+	/* Long length */
+	if(ptr[0] == 0x1f) {
+		header_offset = 1;
+	}
+	header_len = ptr[header_offset++];
+
+	if(header_len > 4) {
+		chan_quectel_err = E_UNKNOWN;
+		return -1;
+	}
+
+	for(int i=0;i<header_len;i++) {
+		header_val <<= 8;
+		header_val |= ptr[header_offset + i];
+	}
+
+	if(outptr != NULL) {
+		*outptr = header_val;
+	}
+	ast_verb (10, "%s: MMS PDU header %02x: int(%3$x) %d", __func__, ptr[-1], header_len, header_val);
+	return header_len + header_offset;
+}
+
+size_t __wsp_parse_text_string_value(uint8_t *ptr, size_t len, char *outptr) {
+	size_t header_len = 0;
+	size_t header_offset = 0;
+
+	while(ptr[header_len++]);
+
+	if(outptr != NULL) {
+		strncpy(outptr, &ptr[header_offset], header_len);
+	}
+
+	ast_verb (10, "%s: MMS PDU header %02x: string(%3$x)", __func__, ptr[-1], header_len);
+	return header_len;
+}
+
+size_t __wsp_parse_encoded_string_value(uint8_t *ptr, size_t len, char *outptr) {
+	size_t header_len = 0;
+	size_t header_offset = 0;
+
+	/* Plain text-string */
+	if(ptr[0] > 0x1f) {
+		while(ptr[header_len++]);
+	}
+	/* Long value-length */
+	else if(ptr[0] == 0x1f) {
+		header_offset = 3;
+		header_len = ptr[1] + 2;
+		if(ptr[2] != 0xea) {
+			chan_quectel_err = E_PARSE_UTF8;
+			return -1;
+		}
+		header_len = header_len - header_offset;
+	}
+	else {
+		header_offset = 2;
+		header_len = ptr[0] + 1;
+		if(ptr[1] != 0xea) {
+			chan_quectel_err = E_PARSE_UTF8;
+			return -1;
+		}
+		header_len = header_len - header_offset;
+	}
+
+	if(outptr != NULL) {
+		strncpy(outptr, &ptr[header_offset], header_len);
+		outptr[header_len] = '\0';
+	}
+
+	ast_verb (10, "%s: MMS PDU header %02x: string(%3$x)", __func__, ptr[-1], header_len);
+	return header_len + header_offset;
+}
+
+EXPORT_DEF int __wsp_parse_content_type(uint8_t *pdu, size_t pdu_length, uint8_t *content_type) {
+	size_t i = 0;
+
+	if(pdu[i] < 0x20) {
+		uint32_t length = 0;
+
+		int res;
+		if((res = __wsp_parse_uint_variable(&pdu[i], pdu_length - i, &length)) < 0) {
+			ast_log (LOG_ERROR, "%s: Failed to parse length (max length %d exceeded)", __func__, pdu_length - i);
+			return -1;
+		}
+		i+=res;
+		ast_verb (10, "%s: Content-Type length %x", __func__, length);
+
+		*content_type = pdu[i];
+
+		i+=length;
+		return i;
+	}
+	else if(pdu[i] < 0x80) {
+		char tmp[4096];
+		ast_verb (10, "%s: Content-Type in string form is not supported", __func__);
+		return -1;
+	}
+	else {
+		*content_type = pdu[i++];
+		return i;
+	}
+}
+
+EXPORT_DEF int wsp_parse(uint8_t *pdu, size_t pdu_length, uint16_t dst_port, uint16_t src_port, char *oa, char *mms_trxid, char *mms_url, char *msg) {
+	size_t i = 0;
+	size_t out_len = 0;
+
+	/* Parse WSP header */
+	uint8_t wspti, wsppt, wsphl;
+	size_t wspctl = 1;
+	wspti = pdu[i++];
+	wsppt = pdu[i++];
+	wsphl = pdu[i++];
+
+	// ast_verb (10, "%s: WSP (trx_id: %02x, pdu_type: %02x, header_length: %02x)", __func__, wspti, wsppt, wsphl);
+	if((pdu[i]&0x7f) != 0x3e) {
+		char header_value[255];
+		wspctl=__wsp_parse_encoded_string_value(pdu + i, pdu_length - i, header_value);
+		if(strcmp(header_value, "application/vnd.wap.mms-message") != 0) {
+			chan_quectel_err = E_UNKNOWN;
+			return -1;
+		}
+	}
+	else {
+		ast_verb (10, "%s: WSP PDU content-type: 0x%02x", __func__, pdu[i]&0x7f);
+	}
+
+	i+=wspctl;
+	wsphl-=wspctl;
+
+	while (wsphl > 0) {
+		int header_id = pdu[i++];
+		wsphl--;
+
+		if(header_id & 0x80) {
+			uint8_t header_val = pdu[i++];
+			wsphl--;
+			switch(header_id & 0x7f) {
+				/* X-Wap-Application-Id */
+				case 0x2f:
+					if(!(header_val & 0x80) || (header_val & 0x7f) != 0x04) {
+						chan_quectel_err = E_UNKNOWN;
+						return -1;
+					}
+					ast_verb (10, "%s: MMS application discovered", __func__);
+					return mms_parse(pdu + i, pdu_length - i, oa, mms_trxid, mms_url, msg);
+					break;
+				default:
+					break;
+			}
+		}
+		else {
+			/* skip textual header */
+			int textual_len = pdu[i++];
+			i+=textual_len;
+			wsphl-=textual_len;
+		}
+	}
+
+	chan_quectel_err = E_UNKNOWN;
+	return -1;
+}
+
+EXPORT_DEF int mms_parts_parse(uint8_t *pdu, size_t pdu_length, char *msg) {
+	size_t i = 0;
+	size_t count = 0;
+	size_t headerLength = 0;
+	size_t dataLength = 0;
+
+	int res;
+	if((res = __wsp_parse_uint_variable(&pdu[i], pdu_length - i, &count)) < 0) {
+		ast_log (LOG_ERROR, "%s: Failed to parse count", __func__);
+		return -1;
+	}
+	i+=res;
+	if((res = __wsp_parse_uint_variable(&pdu[i], pdu_length - i, &headerLength)) < 0) {
+		ast_log (LOG_ERROR, "%s: Failed to parse header length", __func__);
+		return -1;
+	}
+	i+=res;
+	if((res = __wsp_parse_uint_variable(&pdu[i], pdu_length - i, &dataLength)) < 0) {
+		ast_log (LOG_ERROR, "%s: Failed to parse data length", __func__);
+		return -1;
+	}
+	i+=res;
+
+	/* YAME: skip headers */
+	i+=headerLength;
+
+	strncpy(msg, &pdu[i], dataLength);
+	msg[dataLength] = '\0';
+
+	i+=dataLength;
+	return i;
+}
+
+EXPORT_DEF int mms_parse(uint8_t *pdu, size_t pdu_length, char *oa, char *mms_trxid, char *mms_url, char *msg) {
+	size_t i = 0;
+	size_t out_len = 0;
+
+	while(i < pdu_length) {
+		uint8_t header_id = pdu[i++], header_val = 0;
+		size_t header_len = 1, header_offset = 0;
+		int res;
+
+		ast_verb (10, "%s: MMS parser offset 0x%02x value 0x%02x", __func__, i-1, pdu[i-1]);
+
+		switch(header_id & 0x7f) {
+			/* From */
+			case 0x09: {
+					char *suffix_pos = NULL;
+					header_offset = 2;
+					if(pdu[i+1] != 0x80) {
+						ast_verb (10, "%s: MMS From header token error: expected 0x80, was 0x%02x", __func__, pdu[i+1]);
+						chan_quectel_err = E_UNKNOWN;
+						return -1;
+					}
+					header_len=__wsp_parse_encoded_string_value(&pdu[i + header_offset], pdu_length - i - header_offset, oa);
+					ast_verb (10, "%s: MMS From offset 0x%02x value %s", __func__, i-1, oa);
+				}
+				break;
+
+			/* Subject */
+			case 0x16:
+				header_len=__wsp_parse_encoded_string_value(&pdu[i + header_offset], pdu_length - i - header_offset, msg);
+				ast_verb (10, "%s: MMS Subject offset 0x%02x value %s", __func__, i-1, msg);
+				break;
+
+			/* X-Mms-Transaction-Id */
+			case 0x18:
+				header_len=__wsp_parse_text_string_value(&pdu[i], pdu_length - i, mms_trxid);
+				ast_verb (10, "%s: MMS X-Mms-Transaction-Id offset 0x%02x value %s", __func__, i-1, mms_trxid);
+				break;
+
+			/* X-Mms-Content-Location */
+			case 0x03:
+				header_len=__wsp_parse_text_string_value(&pdu[i], pdu_length - i, mms_url);
+				ast_verb (10, "%s: MMS X-Mms-Content-Location offset 0x%02x value %s", __func__, i-1, mms_url);
+				break;
+
+			/* Content-Type */
+			case 0x04:
+				{
+					uint8_t content_type = -1;
+					header_len=__wsp_parse_content_type(&pdu[i], pdu_length - i, &content_type);
+
+					/* YAME: treat every multipart as single body. get only first message */
+					switch(content_type & 0x7f) {
+						/* application/vnd.wap.multipart.mixed */
+						case 0x23:
+							return mms_parts_parse(pdu + i + (header_len+header_offset), pdu_length - i - (header_len+header_offset), msg);
+							break;
+						/* application/vnd.wap.multipart.related */
+						case 0x33:
+							return mms_parts_parse(pdu + i + (header_len+header_offset), pdu_length - i - (header_len+header_offset), msg);
+							break;
+						default:
+							ast_verb (10, "%s: MMS Content-Type header token error: Unknown content-type 0x%02x", __func__, content_type);
+							chan_quectel_err = E_UNKNOWN;
+							return -1;
+					}
+					break;
+				}
+
+			/* Common null-terminate headers */
+			case 0x0B:
+			case 0x17:
+			case 0x1E:
+			case 0x37:
+			case 0x38:
+			case 0x39:
+			case 0x3D:
+			case 0x3E:
+				header_len=__wsp_parse_text_string_value(&pdu[i], pdu_length - i, mms_url);
+				break;
+
+			/* X-Mms-Message-Size */
+			case 0x0E:
+				header_len=__wsp_parse_long_integer(&pdu[i], pdu_length - i, NULL);
+				break;
+
+			/* Unknown headers */
+			default:
+				header_len=__wsp_parse_unknown(&pdu[i], pdu_length - i, NULL);
+		}
+		if(header_len+header_offset < 0) {
+			ast_verb (10, "%s: MMS header parse error %d: %s\r\n\ton header 0x%02x\r\n\tat offset 0x%02x", __func__, chan_quectel_err, error2str(chan_quectel_err), header_id, i);
+			return -1;
+		}
+		i+=header_len+header_offset;
+	}
+	return 0;
 }

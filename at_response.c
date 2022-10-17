@@ -165,6 +165,71 @@ static int at_response_cend (struct pvt * pvt, const char* str)
 	return 0;
 }
 
+static int at_response_connect (struct pvt* pvt, const char* str, size_t len)
+{
+	char oa[512]="", mms_trxid[255], msg[160*255];
+	const at_queue_task_t * task = at_queue_head_task (pvt);
+	const at_queue_cmd_t * ecmd = at_queue_task_cmd(task);
+
+	if(!ecmd)
+	{
+		ast_log (LOG_ERROR, "[%s] Received unexpected 'CONNECT'\n", PVT_ID(pvt));
+		return 0;
+	}
+
+	if(ecmd->res == RES_CONNECT || ecmd->res == RES_OK)
+	{
+		switch (ecmd->cmd)
+		{
+			case CMD_AT_QHTTPURL:
+				ast_verb (3, "[%s] %s sent successfully\n", PVT_ID(pvt), at_cmd2str (ecmd->cmd));
+				pvt->connect_reply = NULL;
+				at_queue_handle_result (pvt, RES_CONNECT);
+				break;
+			case CMD_AT_QHTTPREAD:
+				ast_verb (3, "[%s] %s response %d (terminated with 0x%02x%02x%02x%02x) bytes (trx_id=%s)\n", PVT_ID(pvt), at_cmd2str (ecmd->cmd), len, str[-3], str[-2], str[-1], str[0], pvt->incoming_mms_trx_id ? pvt->incoming_mms_trx_id : "");
+				str+=9;
+				len-=9;
+				pvt->connect_length = -1;
+				if(pvt->incoming_mms_trx_id) {
+					char *mms_pdu_hexified = ast_malloc(len*2+1);
+					hexify(str, len, mms_pdu_hexified);
+					ast_verb (3, "[%s] %s\n", PVT_ID(pvt), mms_pdu_hexified);
+					ast_free(mms_pdu_hexified);
+
+					if(at_parse_mms_pdu(str, len, oa, mms_trxid, msg) < 0) {
+						ast_log (LOG_ERROR, "[%s] %s: at_parse_mms_pdu returned non-zero", PVT_ID(pvt), __func__);
+						return 0;
+					}
+
+					{
+						char *text_base64 = ast_base64encode_string(msg);
+						manager_event_new_sms(PVT_ID(pvt), oa, msg);
+						manager_event_new_sms_base64(PVT_ID(pvt), oa, text_base64);
+						channel_var_t vars[] =
+						{
+							{ "SMS", msg },
+							{ "SMS_BASE64", text_base64 },
+							{ NULL, NULL },
+						};
+						start_local_channel (pvt, "sms", oa, vars);
+						ast_free(text_base64);
+					}
+					pvt->incoming_mms_trx_id = NULL;
+				}
+				break;
+			default:
+				ast_log (LOG_ERROR, "[%s] Received 'CONNECT' for unhandled command '%s'\n", PVT_ID(pvt), at_cmd2str (ecmd->cmd));
+				break;
+		}
+	}
+	else
+	{
+		ast_log (LOG_ERROR, "[%s] Received 'CONNECT' when expecting '%s', ignoring\n", PVT_ID(pvt), at_res2str (ecmd->res));
+	}
+
+	return 0;
+}
 
 static int at_response_ok (struct pvt* pvt, at_res_t res)
 {
@@ -199,6 +264,8 @@ static int at_response_ok (struct pvt* pvt, at_res_t res)
 			case CMD_AT_CSCA:
 			case CMD_AT_CLCC:
 			case CMD_AT_CLIR:
+			case CMD_AT_QMMS_INIT:
+			case CMD_AT_QHTTPGET:
 				ast_debug (3, "[%s] %s sent successfully\n", PVT_ID(pvt), at_cmd2str (ecmd->cmd));
 				break;
 
@@ -1405,6 +1472,144 @@ at_poll_sms (struct pvt *pvt)
 }
 
 /*!
+ * \brief Handle +CMT response
+ * \param pvt -- pvt structure
+ * \param str -- string containing response (null terminated)
+ * \param len -- string lenght
+ * \retval  0 success
+ * \retval -1 error
+ */
+
+static int at_response_cmt (struct pvt* pvt, const char * str, size_t len)
+{
+	char		oa[512] = "", sca[512] = "";
+	char scts[64], dt[64];
+	int mr, st;
+	char		msg[4096];
+	int		res;
+	char		text_base64[40800];
+	size_t		msg_len = sizeof(msg);
+	int tpdu_type;
+	pdu_udh_t	udh;
+	pdu_udh_init(&udh);
+	char fullmsg[160 * 255];
+	int fullmsg_len;
+	int csms_cnt;
+	char buf[512];
+	char payload[SMSDB_PAYLOAD_MAX_LEN];
+	ssize_t payload_len;
+	int status_report[256];
+
+	manager_event_message("QuectelNewCMT", PVT_ID(pvt), str);
+	at_queue_handle_result (pvt, RES_CMT);
+
+	res = at_parse_cmt(str, len, &tpdu_type, sca, sizeof(sca), oa, sizeof(oa), scts, &mr, &st, dt, msg, &msg_len, &udh);
+	if (res < 0) {
+		ast_base64encode (text_base64, str, len, sizeof(text_base64));
+		ast_log(LOG_WARNING, "[%s] Error parsing incoming message: %s [%s]\n", PVT_ID(pvt), error2str(chan_quectel_err), text_base64);
+		return 0;
+	}
+	switch (PDUTYPE_MTI(tpdu_type)) {
+	case PDUTYPE_MTI_SMS_STATUS_REPORT:
+		ast_verb(1, "[%s] Got status report with ref %d from %s and status code %d\n", PVT_ID(pvt), mr, oa, st);
+		snprintf(buf, 64, "Delivered\r\nForeignID: %d", mr);
+		payload_len = smsdb_outgoing_part_status(pvt->imsi, oa, mr, st, status_report, payload);
+		if (payload_len >= 0) {
+			int success = 1;
+			char status_report_str[255 * 4 + 1];
+			int srroff = 0;
+			for (int i = 0; status_report[i] != -1; ++i) {
+				success &= !(status_report[i] & 0x40);
+				sprintf(status_report_str + srroff, "%03d,", status_report[i]);
+				srroff += 4;
+			}
+			status_report_str[srroff] = '\0';
+			ast_verb(1, "[%s] Success: %d; Payload: %.*s; Report string: %s\n", PVT_ID(pvt), success, (int) payload_len, payload, status_report_str);
+			payload[payload_len] = '\0';
+			channel_var_t vars[] =
+			{
+				{ "SMS_REPORT_PAYLOAD", payload } ,
+				{ "SMS_REPORT_TS", scts },
+				{ "SMS_REPORT_DT", dt },
+				{ "SMS_REPORT_SUCCESS", success ? "1" : "0" },
+				{ "SMS_REPORT_TYPE", "e" },
+				{ "SMS_REPORT", status_report_str },
+				{ NULL, NULL },
+			};
+			start_local_channel(pvt, "report", oa, vars);
+			manager_event_report(PVT_ID(pvt), payload, payload_len, scts, dt, success, 1, status_report_str);
+		}
+		break;
+	case PDUTYPE_MTI_SMS_DELIVER:
+		if (udh.parts > 1) {
+			ast_verb (1, "[%s] Got SM part from %s: '%s'; [ref=%d, parts=%d, order=%d, dst_port=%d, src_port=%d]\n", PVT_ID(pvt), oa, msg, udh.ref, udh.parts, udh.order, udh.dst_port, udh.src_port);
+			csms_cnt = smsdb_put(pvt->imsi, oa, udh.ref, udh.parts, udh.order, msg, fullmsg);
+			if (csms_cnt <= 0) {
+				ast_log(LOG_ERROR, "[%s] Error putting SMS to SMSDB\n", PVT_ID(pvt));
+				goto receive_as_is;
+			}
+			if (csms_cnt < udh.parts) {
+				ast_verb (1, "[%s] Waiting for following parts\n", PVT_ID(pvt));
+				return 0;
+			}
+			fullmsg_len = strlen(fullmsg);
+		} else {
+receive_as_is:
+			ast_verb (1, "[%s] Got single SM from %s: '%s'\n", PVT_ID(pvt), oa, msg);
+			strncpy(fullmsg, msg, msg_len);
+			fullmsg[msg_len] = '\0';
+			fullmsg_len = msg_len;
+		}
+
+		if(udh.dst_port && udh.src_port) {
+			ast_verb (1, "[%s] WSP detected. Call wsp_parse\n", PVT_ID(pvt));
+			char wsp[sizeof(fullmsg)/2];
+			int wsp_length = (unhex(fullmsg, wsp) + 1) / 2;
+			char mms_trxid[64]="", mms_url[255]="";
+			res = wsp_parse (wsp, wsp_length, udh.dst_port, udh.src_port, oa, mms_trxid, mms_url, fullmsg);
+			if(res < 0) {
+				ast_log(LOG_WARNING, "[%s] Error parsing WSP message: %s [%s]\n", PVT_ID(pvt), error2str(chan_quectel_err), fullmsg);
+				return 0;
+			}
+			fullmsg_len = res;
+			ast_verb (1, "[%s] MMS message detected. (imsi=%s,transaction_id=%s,location=%s)\n", PVT_ID(pvt), pvt->imsi, mms_trxid, mms_url);
+
+			res = smsdb_mms_put(pvt->imsi, mms_trxid, mms_url, fullmsg);
+			if(res < 0) {
+				ast_log(LOG_WARNING, "[%s] MMS database failure (%s)\n", PVT_ID(pvt), error2str(chan_quectel_err), mms_trxid);
+				return 0;
+			}
+
+			ast_verb (1, "[%s] Trying to retrieve mms %s\n", PVT_ID(pvt), mms_url);
+			res = at_enqueue_retrieve_mms(&pvt->sys_chan, mms_trxid, mms_url, SUPPRESS_ERROR_DISABLED);
+			if(res < 0) {
+				ast_log(LOG_WARNING, "[%s] MMS retrieve failure (%s)\n", PVT_ID(pvt), error2str(chan_quectel_err), mms_trxid);
+				return 0;
+			}
+
+			return 0;
+		}
+		ast_verb (1, "[%s] Got full SMS from %s: '%s'\n", PVT_ID(pvt), oa, fullmsg);
+		ast_base64encode (text_base64, (unsigned char*)fullmsg, fullmsg_len, sizeof(text_base64));
+
+		manager_event_new_sms(PVT_ID(pvt), oa, fullmsg);
+		manager_event_new_sms_base64(PVT_ID(pvt), oa, text_base64);
+		{
+			channel_var_t vars[] =
+			{
+				{ "SMS", fullmsg } ,
+				{ "SMS_BASE64", text_base64 },
+				{ "SMS_TS", scts },
+				{ NULL, NULL },
+			};
+			start_local_channel (pvt, "sms", oa, vars);
+		}
+		break;
+	}
+	return 0;
+}
+
+/*!
  * \brief Handle +CMTI response
  * \param pvt -- pvt structure
  * \param str -- string containing response (null terminated)
@@ -2013,6 +2218,66 @@ static void at_response_busy(struct pvt* pvt, enum ast_control_frame_type contro
 }
 
 /*!
+ * \brief Handle +QHTTPGET response
+ * \param pvt -- pvt structure
+ * \param str -- string containing response (null terminated)
+ * \param len -- string lenght
+ * \retval  0 success
+ * \retval -1 error
+ */
+static int at_response_qhttpget(struct pvt* pvt, const char* str)
+{
+	ast_verb(10, "[%s] %s: at_parse_qhttpget", PVT_ID(pvt), __func__);
+	int response_len = at_parse_qhttpget (str);
+	ast_verb(10, "[%s] %s: at_parse_qhttpget len=%d", PVT_ID(pvt), __func__, response_len);
+	at_queue_cmd_t cmds[] = {
+		ATQ_CMD_DECLARE_ST(CMD_AT_QHTTPREAD, "AT+QHTTPREAD=5\r"),
+	};
+	unsigned cmdsno = ITEMS_OF(cmds);
+
+	if (response_len <= 0)
+	{
+		ast_debug (2, "[%s] Error on process http request \"%s\"\n", PVT_ID(pvt), str);
+		return -1;
+	}
+
+	ast_verb(10, "[%s] %s: Received HTTP body length %d", PVT_ID(pvt), __func__, response_len);
+	pvt->connect_length = response_len;
+
+	int err;
+	ast_verb(10, "[%s] %s: Send AT+QHTTPREAD req", PVT_ID(pvt), __func__);
+	if (at_queue_insert_const(&pvt->sys_chan, cmds, ITEMS_OF(cmds), 1) != 0) {
+		chan_quectel_err = E_QUEUE;
+		return -1;
+	}
+	ast_verb(10, "[%s] %s: Send AT+QHTTPREAD req success", PVT_ID(pvt), __func__);
+	return 0;
+}
+
+/*!
+ * \brief Handle +QHTTPREAD response
+ * \param pvt -- pvt structure
+ * \param str -- string containing response (null terminated)
+ * \param len -- string lenght
+ * \retval  0 success
+ * \retval -1 error
+ */
+static int at_response_qhttpread(struct pvt* pvt, const char* str)
+{
+	ast_verb(10, "[%s] %s: at_parse_qhttpread", PVT_ID(pvt), __func__);
+
+	if (at_parse_qhttpread (str))
+	{
+		ast_debug (2, "[%s] Error on process http read request \"%s\"\n", PVT_ID(pvt), str);
+		return -1;
+	}
+
+	pvt->connect_length = -1;
+
+	return 0;
+}
+
+/*!
  * \brief Do response
  * \param pvt -- pvt structure
  * \param iovcnt -- number of elements array pvt->d_read_iov
@@ -2089,6 +2354,16 @@ int at_response (struct pvt* pvt, const struct iovec iov[2], int iovcnt, at_res_
 				}
 				return 0;
 
+			case RES_CONNECT:
+				return at_response_connect (pvt, str, len);
+
+			case RES_QHTTPGET:
+				return at_response_qhttpget (pvt, str);
+
+			case RES_QHTTPREAD:
+				at_response_qhttpread (pvt, str);
+				return 0;
+
 			case RES_OK:
 				at_response_ok (pvt, at_res);
 				return 0;
@@ -2144,6 +2419,10 @@ int at_response (struct pvt* pvt, const struct iovec iov[2], int iovcnt, at_res_
 */
 			case RES_CDSI:
 				return at_response_cdsi (pvt, str);
+
+			case RES_CMT:
+				return at_response_cmt (pvt, str, len);
+
 			case RES_CMTI:
 				return at_response_cmti (pvt, str);
 
@@ -2171,6 +2450,7 @@ int at_response (struct pvt* pvt, const struct iovec iov[2], int iovcnt, at_res_
 				ast_log (LOG_ERROR, "[%s] Receive NO DIALTONE\n", PVT_ID(pvt));
 				at_response_busy(pvt, AST_CONTROL_CONGESTION);
 				break;
+
 			case RES_NO_CARRIER:
 				ast_log (LOG_WARNING, "[%s] Receive NO CARRIER\n", PVT_ID(pvt));
 

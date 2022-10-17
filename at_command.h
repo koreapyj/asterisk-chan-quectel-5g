@@ -75,6 +75,11 @@
 	_( AT_CHLD_2,       "AT+CHLD=2") \
 	_( AT_CHLD_3,       "AT+CHLD=3") \
 	_( AT_CLCC,         "AT+CLCC") \
+\
+	_( AT_QMMS_INIT,    "AT+QIDEACT=") \
+	_( AT_QHTTPURL,     "AT+QHTTPURL=") \
+	_( AT_QHTTPGET,     "AT+QHTTPGET=") \
+	_( AT_QHTTPREAD,    "AT+QHTTPREAD=") \
 /* AT_COMMANDS_TABLE */
 
 typedef enum {
